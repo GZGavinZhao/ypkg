@@ -12,19 +12,14 @@ actions:
     - make_install: |
         %make install DESTDIR="%installroot%"
     - cmake: |
-        cmake -DCMAKE_CFLAGS="${CFLAGS}" -DCMAKE_CXX_FLAGS="${CXXFLAGS}" \
+        cmake -DCMAKE_C_FLAGS="${CFLAGS}" -DCMAKE_CXX_FLAGS="${CXXFLAGS}" \
         -DCMAKE_LD_FLAGS="${LDFLAGS}" -DCMAKE_LIB_SUFFIX="%LIBSUFFIX%" \
         -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_INSTALL_PREFIX=%PREFIX%
     - cmake_ninja: |
-        function cmake_ninja() {
-            mkdir solusBuildDir && pushd solusBuildDir
-            cmake -G Ninja .. \
-            -DCMAKE_CFLAGS="${CFLAGS}" -DCMAKE_CXX_FLAGS="${CXXFLAGS}" \
-            -DCMAKE_LD_FLAGS="${LDFLAGS}" -DCMAKE_LIB_SUFFIX="%LIBSUFFIX%" \
-            -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_INSTALL_PREFIX=%PREFIX% $* || exit 1
-            popd
-        }
-        cmake_ninja
+        cmake -G Ninja . -B solusBuildDir \
+        -DCMAKE_C_FLAGS="${CFLAGS}" -DCMAKE_CXX_FLAGS="${CXXFLAGS}" \
+        -DCMAKE_LD_FLAGS="${LDFLAGS}" -DCMAKE_LIB_SUFFIX="%LIBSUFFIX%" \
+        -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_INSTALL_PREFIX=%PREFIX%
     - meson_configure: |
         CFLAGS="${CFLAGS}" CXXFLAGS="${CXXFLAGS}" LDFLAGS="${LDFLAGS}" meson --prefix %PREFIX% --buildtype=plain --libdir="lib%LIBSUFFIX%" --libexecdir="lib%LIBSUFFIX%/%PKGNAME%" --sysconfdir=/etc --localstatedir=/var solusBuildDir
     - ninja_build: &ninja_build |
@@ -200,37 +195,47 @@ actions:
         python_compile
     - python3_setup: |
         function python3_setup() {
-            if [[ -e $PKG_BUILD_DIR/.workdir ]]; then
-                cd $(cat $PKG_BUILD_DIR/.workdir)
-            else
-                echo $workdir > $PKG_BUILD_DIR/.workdir
-            fi
+                if [[ -e $PKG_BUILD_DIR/.workdir ]]; then
+                    cd $(cat $PKG_BUILD_DIR/.workdir)
+                else
+                    echo $workdir > $PKG_BUILD_DIR/.workdir
+                fi
 
-            instdir=`basename $PWD`
-            pushd ..
-                cp -a $instdir py3build && pushd py3build
-                    python3 setup.py build $* || exit
+                instdir=`basename $PWD`
+                pushd ..
+                    cp -a $instdir py3build && pushd py3build
+                        if [[ -f "setup.py" ]]; then
+                            python3 setup.py build $* || exit
+                        else
+                            echo "No setup.py file found, assuming project is PEP517 compatibile"
+                            python3 -m build --wheel --no-isolation
+                        fi
+                    popd
                 popd
-            popd
         }
         python3_setup
     - python3_install: |
         function python3_install() {
-            if [[ -e $PKG_BUILD_DIR/.workdir ]]; then
-                cd $(cat $PKG_BUILD_DIR/.workdir)
-            else
-                echo $workdir > $PKG_BUILD_DIR/.workdir
-            fi
-
-            instdir=`basename $PWD`
-            pushd ..
-                if [[ ! -d py3build ]]; then
-                    cp -a $instdir py3build
+                if [[ -e $PKG_BUILD_DIR/.workdir ]]; then
+                    cd $(cat $PKG_BUILD_DIR/.workdir)
+                else
+                    echo $workdir > $PKG_BUILD_DIR/.workdir
                 fi
-                pushd py3build
-                    python3 setup.py install --root="%installroot%" $* || exit
+
+                instdir=`basename $PWD`
+                pushd ..
+                    if [[ ! -d py3build ]]; then
+                        cp -a $instdir py3build
+                    fi
+                    pushd py3build
+                        if [[ -f "setup.py" ]]; then
+                            python3 setup.py install --root="%installroot%" $* || exit
+                        else
+                            echo "No setup.py file found, installing for PEP 517"
+                            python3 -m installer --destdir=%installroot% dist/*.whl
+                        fi
+                    popd
                 popd
-            popd
         }
         python3_install
     - python3_test: |
@@ -322,6 +327,28 @@ actions:
         fi
     - python3_avx2_lib_shift: |
         find %installroot%/usr/lib/python%python3_version%/ -name '*.so' -exec sh -c 'mv "$0" "${0%.so}.so.avx2"' {} \;
+    ### BOLT Macros
+    # Instrument file with llvm-bolt
+    - bolt_instr: |
+        binstr(){
+            mv ${1} ${1}.orig
+            mkdir -p $PKG_BUILD_DIR/BOLT/final
+            llvm-bolt ${1}.orig -instrument --instrumentation-file=$PKG_BUILD_DIR/BOLT/$(basename ${1}) --instrumentation-file-append-pid ${2} ${3} ${4} -o ${1}
+        }
+        binstr
+    # Merge fdata profiles into a single file
+    - bolt_merge: |
+        bmerge(){
+            merge-fdata $PKG_BUILD_DIR/BOLT/$(basename ${1}).*.fdata > $PKG_BUILD_DIR/BOLT/final/$(basename ${1}).fdata
+        }
+        bmerge
+    # Apply bolt profile
+    - bolt_opt: |
+        boptim(){
+            llvm-bolt ${1}.orig -o ${1}.bolt -data=$PKG_BUILD_DIR/BOLT/final/$(basename ${1}).fdata -reorder-blocks=cache+ -reorder-functions=hfsort+ -split-functions=3 -split-all-cold -split-eh -dyno-stats -icf=1 -use-gnu-stack -use-old-text ${2} ${3} ${4}
+            cp ${1}.bolt ${1}
+        }
+        boptim
 defines:
     - CONFOPTS: |
         --prefix=%PREFIX% --build=%HOST% --libdir=%libdir% --mandir=/usr/share/man \

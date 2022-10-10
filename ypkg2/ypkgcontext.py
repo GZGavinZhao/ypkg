@@ -26,7 +26,7 @@ SPEED_FLAGS = "-fno-semantic-interposition -O3 -falign-functions=32"
 # CLI flag to control it. It also does a better job on function alignment.
 SPEED_FLAGS_CLANG = "-O3"
 
-BIND_NOW_FLAGS = ["-Wl,-z,now", "-Wl,-z -Wl,relro", "-Wl,-z -Wl,now"]
+BIND_NOW_FLAGS = ["-Wl,-z,now", "-Wl,-z -Wl,relro", "-Wl,-z -Wl,now", "-fno-plt"]
 
 # Allow turning off the symbolic functions linker flag
 SYMBOLIC_FLAGS = ["-Wl,-Bsymbolic-functions"]
@@ -40,9 +40,8 @@ SIZE_FLAGS = "-Os"
 # Unfortunately clang's LLVMGold will not accept -Os and is broken by design
 SIZE_FLAGS_CLANG = "-O2"
 
-# Allow optimizing for lto
-LTO_FLAGS = "-flto=%YJOBS%"
-LTO_FLAGS_CLANG = "-flto"
+# Allow optimizing for LTO
+LTO_FLAGS = "-flto=auto"
 
 # Allow optimizing for thin-lto
 THIN_LTO_FLAGS = "-flto=thin"
@@ -71,8 +70,17 @@ PGO_GEN_FLAGS = "-fprofile-generate -fprofile-dir=\"{}\" "
 PGO_USE_FLAGS = "-fprofile-use -fprofile-dir=\"{}\" -fprofile-correction"
 
 # Clang can handle parameters to the args unlike GCC
-PGO_GEN_FLAGS_CLANG = "-fprofile-instr-generate=\"{}/default-%m.profraw\""
-PGO_USE_FLAGS_CLANG = "-fprofile-instr-use=\"{}/default.profdata\""
+PGO_GEN_FLAGS_CLANG = "-fprofile-generate=\"{}/default-%m.profraw\""
+PGO_USE_FLAGS_CLANG = "-fprofile-use=\"{}/default.profdata\""
+
+# BOLT: Emit relocations for bolt
+EMIT_RELOCS = "-Wl,--emit-relocs"
+
+# BOLT: Don't do this gcc optimization for bolt
+NO_REORDER_BLOCKS_PARTITIONS = "-fno-reorder-blocks-and-partition"
+
+# Compile with polly (llvm toolchain only)
+POLLY = "-mllvm -polly -mllvm -polly-vectorizer=stripmine"
 
 # AVX2
 AVX2_ARCH = "haswell"
@@ -125,10 +133,7 @@ class Flags:
                 else:
                     newflags.extend(SIZE_FLAGS.split(" "))
         elif opt_type == "lto":
-            if clang:
-                newflags.extend(LTO_FLAGS_CLANG.split(" "))
-            else:
-                newflags.extend(LTO_FLAGS.split(" "))
+            newflags.extend(LTO_FLAGS.split(" "))
         elif opt_type == "unroll-loops":
             newflags.extend(UNROLL_LOOPS_FLAGS.split(" "))
         elif opt_type == "runpath":
@@ -151,6 +156,16 @@ class Flags:
                 newflags.extend(GOLD_LINKER_FLAGS.split(" "))
         elif opt_type == "function-sections":
             newflags.extend(FUNCTION_SECTION_FLAGS.split(" "))
+        elif opt_type == "no-reorder-blocks-partition":
+            newflags.extend(NO_REORDER_BLOCKS_PARTITIONS.split(" "))
+        elif opt_type == "emit-relocs":
+            newflags.extend(EMIT_RELOCS.split(" "))
+        elif opt_type == "polly":
+            if clang:
+                newflags.extend(POLLY.split(" "))
+            else:
+                console_ui.emit_warning("Flags", "Optimization only supported with clang: {}".
+                                        format(opt_type))
         else:
             console_ui.emit_warning("Flags", "Unknown optimization: {}".
                                     format(opt_type))
@@ -381,7 +396,7 @@ class YpkgContext:
             self.build.cc = "{}-gcc".format(self.pconfig.values.build.host)
             self.build.cxx = "{}-g++".format(self.pconfig.values.build.host)
             if self.spec.pkg_optimize:
-                if "thin-lto" or "icf-safe" or "icf-all" in self.spec.pkg_optimize:
+                if "thin-lto" or "icf-safe" or "icf-all" or "emit-relocs" in self.spec.pkg_optimize:
                     self.build.ldflags = Flags.filter_flags(self.build.ldflags, \
                                                         NON_LD_LINKER_FLAGS)
 
@@ -397,7 +412,7 @@ class YpkgContext:
     def init_optimize(self):
         """ Handle optimize settings within the spec """
         for opt in self.spec.pkg_optimize:
-            if opt == "runpath" or opt == "icf-safe" or opt == "icf-all":
+            if opt == "runpath" or opt == "icf-safe" or opt == "icf-all" or opt == "emit-relocs":
                 pass
             else:
                 self.build.cflags = Flags.optimize_flags(self.build.cflags,
@@ -408,7 +423,7 @@ class YpkgContext:
                                                         self.spec.pkg_clang)
             if opt == "no-bind-now" or opt == "no-symbolic" \
                 or opt == "runpath" or opt == "icf-safe"    \
-                or opt == "icf-all":
+                or opt == "icf-all" or opt == "emit-relocs" :
                 self.build.ldflags = Flags.optimize_flags(self.build.ldflags,
                                                           opt,
                                                           self.spec.pkg_clang)
@@ -458,6 +473,9 @@ class YpkgContext:
                                                 pgo_dir,
                                                 self.spec.pkg_clang)
         self.build.cxxflags = Flags.pgo_gen_flags(self.build.cxxflags,
+                                                  pgo_dir,
+                                                  self.spec.pkg_clang)
+        self.build.ldflags = Flags.pgo_gen_flags(self.build.ldflags,
                                                   pgo_dir,
                                                   self.spec.pkg_clang)
 
